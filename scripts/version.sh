@@ -32,12 +32,35 @@ if [ -z "$VERSION_CRICTL" ]; then
     VERSION_CRICTL="v0.0.0"
 fi
 
-VERSION_K8S=$(grep 'k8s.io/kubernetes v' go.mod | head -n1 | awk '{print $2}')
+VERSION_K8S_K3S=$(grep 'k8s.io/kubernetes =>' go.mod | head -n1 | awk '{print $4}')
+VERSION_K8S=${VERSION_K8S_K3S%"-k3s1"}
 if [ -z "$VERSION_K8S" ]; then
     VERSION_K8S="v0.0.0"
 fi
 
-VERSION_CNIPLUGINS="v0.9.1-k3s1"
+VERSION_RUNC=$(grep github.com/opencontainers/runc go.mod | head -n1 | awk '{print $4}')
+if [ -z "$VERSION_RUNC" ]; then
+    VERSION_RUNC="v0.0.0"
+fi
+
+VERSION_FLANNEL=$(grep github.com/flannel-io/flannel go.mod | head -n1 | awk '{print $2}')
+if [ -z "$VERSION_FLANNEL" ]; then
+  VERSION_FLANNEL="v0.0.0"
+fi
+
+VERSION_CRI_DOCKERD=$(grep github.com/Mirantis/cri-dockerd go.mod | head -n1 | awk '{print $4}')
+if [ -z "$VERSION_CRI_DOCKERD" ]; then
+  VERSION_CRI_DOCKERD="v0.0.0"
+fi
+
+VERSION_CNIPLUGINS="v1.2.0-k3s1"
+
+VERSION_KUBE_ROUTER=$(grep github.com/k3s-io/kube-router go.mod | head -n1 | awk '{print $4}')
+if [ -z "$VERSION_KUBE_ROUTER" ]; then
+    VERSION_KUBE_ROUTER="v0.0.0"
+fi
+
+VERSION_ROOT="v0.12.2"
 
 if [[ -n "$GIT_TAG" ]]; then
     if [[ ! "$GIT_TAG" =~ ^"$VERSION_K8S"[+-] ]]; then

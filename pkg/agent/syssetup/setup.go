@@ -1,4 +1,4 @@
-// +build !windows
+//go:build !windows
 
 package syssetup
 
@@ -11,8 +11,8 @@ import (
 	"github.com/google/cadvisor/machine"
 	"github.com/google/cadvisor/utils/sysfs"
 	"github.com/sirupsen/logrus"
+	"k8s.io/component-helpers/node/util/sysctl"
 	kubeproxyconfig "k8s.io/kubernetes/pkg/proxy/apis/config"
-	"k8s.io/kubernetes/pkg/util/sysctl"
 )
 
 func loadKernelModule(moduleName string) {
@@ -33,8 +33,10 @@ func Configure(enableIPv6 bool, config *kubeproxyconfig.KubeProxyConntrackConfig
 	loadKernelModule("nf_conntrack")
 	loadKernelModule("br_netfilter")
 	loadKernelModule("iptable_nat")
+	loadKernelModule("iptable_filter")
 	if enableIPv6 {
 		loadKernelModule("ip6table_nat")
+		loadKernelModule("ip6table_filter")
 	}
 
 	// Kernel is inconsistent about how devconf is configured for

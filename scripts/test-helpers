@@ -71,7 +71,7 @@ export -f pod-ready
 # ---
 
 wait-for-services() {
-    for service in $@; do
+    for service in "$@"; do
         while [[ "$(pod-ready $service | sort -u)" != 'true' ]]; do
             echo "Waiting for service $service to be ready..." >&2
             sleep 5
@@ -98,7 +98,7 @@ export -f wait-for-db-connection
 # ---
 
 verify-valid-version() {
-    docker exec $@ 2>&1 | tee .version.tmp
+    docker exec "$@" 2>&1 | tee .version.tmp
     # check for bad strings in the version output, including '.' in the build metadata
     if grep -oiE '.*(dev|head|unknown|fail|refuse|\+[^"]*\.).*' .version.tmp; then
         return 1
@@ -145,6 +145,9 @@ dump-logs() {
                 docker exec $name crictl logs $container >$node/logs/$cname-$container.log 2>&1
             done
         fi
+        if [ "$1" == "skip-output" ]; then
+            continue
+        fi 
         for log in $node/logs/*.log; do
             echo
             echo "#- Tail: $log"
@@ -153,6 +156,11 @@ dump-logs() {
             echo
         done
     done
+
+    if [ "$1" == "skip-output" ]; then
+        return
+    fi 
+
     for txt in $TEST_DIR/logs/*.txt $TEST_DIR/*/*/logs/*.txt; do
         echo
         echo "#- Cat: $txt"
@@ -182,12 +190,10 @@ retrieve-sonobuoy-logs() {
     fi
 
     mkdir -p $TEST_DIR/sonobuoy
-    sonobuoy retrieve $TEST_DIR/sonobuoy 2>/dev/null || true
-    local logTarball=$TEST_DIR/sonobuoy/*_sonobuoy_*.tar.gz
-
-    if [ -f $logTarball ]; then
-        tar -xz -f $logTarball -C $TEST_DIR/sonobuoy
-        rm $logTarball
+    local logTarball="$(sonobuoy retrieve $TEST_DIR/sonobuoy)"
+    if [ -f "$logTarball" ]; then
+        tar -xz -f "$logTarball" -C $TEST_DIR/sonobuoy
+        rm "$logTarball"
     else
         rm -rf $TEST_DIR/sonobuoy
     fi
@@ -234,9 +240,9 @@ sonobuoy-test() {
     sonobuoy run \
         --config=scripts/sonobuoy-config.json \
         --plugin-env=e2e.E2E_USE_GO_RUNNER=true \
-        --kube-conformance-image-version=${VERSION_K8S} \
+        --kubernetes-version=${VERSION_K8S} \
         --wait=90 \
-        $@ &
+        "$@" &
 
     local sonobuoyPID=$!
     local code=0
@@ -254,6 +260,10 @@ test-cleanup() {
     set +e -x
     echo 'Cleaning up...'
     trap - EXIT INT TERM
+    if has-function test-post-hook; then
+        test-post-hook $code
+        code=$?
+    fi
     if [[ $code -ne 0 ]]; then
         dump-logs
     fi
@@ -263,11 +273,10 @@ test-cleanup() {
         echo "Removing container $container"
         docker rm -f -v $container
     done
-    echo
-    if has-function test-post-hook; then
-      test-post-hook $code
-      code=$?
+    if has-function test-cleanup-hook; then
+        test-cleanup-hook
     fi
+    echo
     if [ "$TEST_CLEANUP" = true ]; then
         echo "Removing test directory $TEST_DIR"
         rm -rf $TEST_DIR
@@ -316,13 +325,10 @@ test-setup() {
 
     SERVER_MINOR=$(awk -F. '{print $2}' <<<${K3S_IMAGE_SERVER:-$K3S_IMAGE})
     AGENT_MINOR=$(awk -F. '{print $2}' <<<${K3S_IMAGE_AGENT:-$K3S_IMAGE})
-    if [ $AGENT_MINOR -gt $SERVER_MINOR ]; then
-        echo "Agent minor version cannot be newer than server - not supported by Kubernetes version skew policy"
+    if [ $NUM_AGENTS -gt 0 ] && [ $AGENT_MINOR -gt $SERVER_MINOR ]; then
+        echo "Agent minor version cannot be higher than server - not supported by Kubernetes version skew policy"
         exit 0
     fi
-
-    local setupFile=./scripts/test-setup-${TEST_TYPE}
-    [ -f $setupFile ] && source $setupFile
 
     echo ${RANDOM}${RANDOM}${RANDOM} >$TEST_DIR/metadata/secret
 }
@@ -330,81 +336,18 @@ export -f test-setup
 
 # ---
 
-gen-certs() {(
-    set -e -x
-    #umask 077
-
-    local opensslConfig=$(pwd)/scripts/test-certs-openssl.cnf
-    local subject="/C=US/ST=AZ/L=Tempe/O=Rancher/OU=DevOps/DC=com/DC=rancher"
-    local caDir=$TEST_DIR/db-ca
-    [ -d $caDir ] && rm -rf $caDir
-    mkdir -p $caDir
-
-    cd $caDir
-    mkdir -p private certs newcerts crl
-    touch index.txt
-    echo '01' > serial
-
-    openssl req \
-        -config $opensslConfig \
-        -new -x509 \
-        -nodes \
-        -subj $subject \
-        -extensions v3_ca \
-        -keyout private/ca.key \
-        -out certs/ca.crt
-
-    openssl req \
-        -config $opensslConfig \
-        -new \
-        -nodes \
-        -subj $subject"/CN=server" \
-        -keyout private/db.key \
-        -out db.csr
-
-    openssl ca \
-        -config $opensslConfig \
-        -batch \
-        -extensions db_server \
-        -keyfile private/ca.key \
-        -cert certs/ca.crt \
-        -out certs/db.crt \
-        -infiles db.csr
-
-    openssl req \
-        -config $opensslConfig \
-        -new \
-        -nodes \
-        -subj $subject"/CN=client" \
-        -keyout private/client.key \
-        -out client.csr
-
-    openssl ca \
-        -config $opensslConfig \
-        -batch \
-        -extensions db_client \
-        -keyfile private/ca.key \
-        -cert certs/ca.crt \
-        -out certs/client.crt \
-        -infiles client.csr
-)}
-export -f gen-certs
-
-# ---
-
-inc-count() {(
-    shopt -s extglob
-    local count=$(exec 2>/dev/null; ls -1d $TEST_DIR/$1/+([0-9]) | xargs -n1 basename | sort -n -r | head -1)
+inc-count() {
+    local count=$(find $TEST_DIR -type d -mindepth 2 -maxdepth 2 -regex ".*/$1/[0-9]+" -printf '%f\n' | sort -nr | head -1)
     count=$((count+1))
     mkdir -p $TEST_DIR/$1/$count/metadata
     echo $count
-)}
+}
 export -f inc-count
 
 # ---
 
 has-function() {
-  [[ ! -z "$1" && $(type -t $1) == "function" ]]
+  [[ -n "$1" && $(type -t $1) == "function" ]]
 } 2> /dev/null
 export -f has-function
 
@@ -412,7 +355,7 @@ export -f has-function
 
 run-function() {
     has-function $1 || return 0
-    $@
+    "$@"
 }
 export -f run-function
 
@@ -421,8 +364,7 @@ export -f run-function
 provision-server() {
     local count=$(inc-count servers)
     local testID=$(basename $TEST_DIR)
-    local name=$(echo "k3s-server-$count-$testID" | tee $TEST_DIR/servers/$count/metadata/name)
-    #local args=$(cat $TEST_DIR/args $TEST_DIR/servers/args $TEST_DIR/servers/$count/args 2>/dev/null)
+    local name=$(echo "k3s-server-${count}-${testID,,}" | tee $TEST_DIR/servers/$count/metadata/name)
     local port=$(timeout --foreground 5s bash -c get-port | tee $TEST_DIR/servers/$count/metadata/port)
     local SERVER_INSTANCE_ARGS="SERVER_${count}_ARGS"
 
@@ -430,14 +372,15 @@ provision-server() {
 
     docker run \
         -d --name $name \
+        --hostname $name \
         --privileged \
-        -v $TEST_DIR/db-ca/:/db-ca \
         -p 127.0.0.1:$port:6443 \
         -p 6443 \
-        -e K3S_TOKEN=$(cat $TEST_DIR/metadata/secret) \
+        -e K3S_TOKEN="$(cat $TEST_DIR/metadata/secret)" \
         -e K3S_DEBUG=true \
+        ${SERVER_DOCKER_ARGS:-} \
         ${REGISTRY_CLUSTER_ARGS:-} \
-        ${K3S_IMAGE_SERVER:-$K3S_IMAGE} server $ARGS $SERVER_ARGS ${!SERVER_INSTANCE_ARGS}
+        ${K3S_IMAGE_SERVER:-$K3S_IMAGE} server ${ARGS} ${SERVER_ARGS} ${!SERVER_INSTANCE_ARGS}
 
     local ip=$(docker inspect --format '{{ .NetworkSettings.IPAddress }}' $name | tee $TEST_DIR/servers/$count/metadata/ip)
     local url=$(echo "https://$ip:6443" | tee $TEST_DIR/servers/$count/metadata/url)
@@ -453,18 +396,21 @@ provision-agent() {
     local K3S_URL=${K3S_URL:-"$(cat $TEST_DIR/servers/1/metadata/url)"}
     local count=$(inc-count agents)
     local testID=$(basename $TEST_DIR)
-    local name=$(echo "k3s-agent-$count-$testID" | tee $TEST_DIR/agents/$count/metadata/name)
-    #local args=$(cat $TEST_DIR/args $TEST_DIR/agents/args $TEST_DIR/agents/$count/args 2>/dev/null)
+    local name=$(echo "k3s-agent-${count}-${testID,,}" | tee $TEST_DIR/agents/$count/metadata/name)
     local AGENT_INSTANCE_ARGS="AGENT_${count}_ARGS"
 
     run-function agent-pre-hook $count
     docker run \
         -d --name $name \
+        --hostname $name \
         --privileged \
         -e K3S_TOKEN=$(cat $TEST_DIR/metadata/secret) \
         -e K3S_URL=$K3S_URL \
+        ${AGENT_DOCKER_ARGS:-} \
         ${REGISTRY_CLUSTER_ARGS:-} \
-        ${K3S_IMAGE_AGENT:-$K3S_IMAGE} agent $ARGS $AGENT_ARGS ${!AGENT_INSTANCE_ARGS}
+        ${K3S_IMAGE_AGENT:-$K3S_IMAGE} agent ${ARGS} ${AGENT_ARGS} ${!AGENT_INSTANCE_ARGS}
+
+    local ip=$(docker inspect --format '{{ .NetworkSettings.IPAddress }}' $name | tee $TEST_DIR/agents/$count/metadata/ip)
 
     echo "Started $name"
     run-function agent-post-hook $count
@@ -492,12 +438,12 @@ provision-cluster() {
         done
     fi
 
+    [ -f "$PROVISION_LOCK" ] && rm $PROVISION_LOCK
+
     timeout --foreground 2m bash -c "wait-for-nodes $(( NUM_SERVERS + NUM_AGENTS ))"
     timeout --foreground 4m bash -c "wait-for-services $WAIT_SERVICES"
 
     run-function cluster-post-hook
-
-    [ -f "$PROVISION_LOCK" ] && rm $PROVISION_LOCK
 }
 export -f provision-cluster
 
@@ -505,9 +451,9 @@ export -f provision-cluster
 
 provision-registry-proxy() {
     set -e -o pipefail
-    local image="docker.io/library/registry:2.7.1"
+    local image="docker.io/library/registry:2.8.1"
     local prefix="docker-registry-"
-    local registries="docker.io:registry-1.docker.io k8s.gcr.io gcr.io quay.io ghcr.io"
+    local registries="docker.io:registry-1.docker.io registry.k8s.io gcr.io quay.io ghcr.io"
     local registries_yaml="$TEST_DIR/registries.yaml"
 
     echo "mirrors:" > $registries_yaml
@@ -548,7 +494,7 @@ export -f provision-registry-proxy
 # ---
 
 early-exit() {
-    printf "\033[33m$1\033[m\n"
+    printf "\033[33m%s\033[m\n" "$1"
     exit $2
 }
 export -f early-exit
@@ -556,18 +502,57 @@ export -f early-exit
 # ---
 
 run-test() {
+    local delay=15
+    (
+      set +x
+      while [ $(count-running-tests) -ge ${MAX_CONCURRENT_TESTS:-4} ]; do
+          sleep $delay
+      done
+    )
+
     export PROVISION_LOCK=$(mktemp)
-    ./scripts/test-runner $@ &
+    ./scripts/test-runner "$@" &
     pids+=($!)
+
     (
         set +x
+        # busy-wait on the provisioning lock before imposing a final inter-test delay
         while [ -f "$PROVISION_LOCK" ]; do
             sleep 1
         done
-        sleep 5
+        sleep $delay
     )
 }
 export -f run-test
+
+# ---
+
+cleanup-test-env(){
+      export NUM_SERVERS=1
+      export NUM_AGENTS=1
+      export AGENT_ARGS=''
+      export SERVER_ARGS=''
+      export WAIT_SERVICES="${all_services[*]}"
+
+      unset AGENT_1_ARGS AGENT_2_ARGS AGENT_3_ARGS AGENT_DOCKER_ARGS
+      unset SERVER_1_ARGS SERVER_2_ARGS SERVER_3_ARGS SERVER_DOCKER_ARGS
+
+      unset -f server-pre-hook server-post-hook agent-pre-hook agent-post-hook cluster-pre-hook cluster-post-hook test-post-hook test-cleanup-hook
+}
+
+# ---
+
+count-running-tests(){
+      local count=0
+      for pid in "${pids[@]}"; do
+          if [ $(pgrep -c -P $pid) -gt 0 ]; then
+            ((count++))
+          fi
+      done
+      echo "Currently running ${count} tests" 1>&2
+      echo ${count}
+}
+export -f count-running-tests
 
 # ---
 
@@ -580,35 +565,41 @@ e2e-test() {
     if [ -n "$E2E_OUTPUT" ]; then
         logOutput=$E2E_OUTPUT/$logName
     fi
-    LABEL=$label LOG_OUTPUT=$logOutput run-test $@
+    if [[ $label =~ ^PARALLEL.* ]]; then
+        LABEL=$label LOG_OUTPUT=$logOutput MAX_CONCURRENT_TESTS=3 run-test "$@"
+    else
+        LABEL=$label LOG_OUTPUT=$logOutput run-test "$@"
+    fi
+
 }
-
-# ---
-
-run-e2e-tests() {
-    label=PARALLEL \
-        logName=e2e-STATUS-${ARCH}-parallel.log \
-        e2e-test ${sonobuoyParallelArgs[@]}
-    echo "Exit code $? for parallel start"
-
-    label=SERIAL \
-        logName=e2e-STATUS-${ARCH}-serial.log \
-        e2e-test ${sonobuoySerialArgs[@]}
-    echo "Exit code $? for serial start"
-}
-export -f run-e2e-tests
 
 # ---
 
 test-run-sonobuoy() {
     local suffix
-    if [ "$1" ]; then
+    if [ "$1" ] && [[ ! $1 =~ ^(serial|parallel)$ ]] ; then
         suffix="-$1"
         export LABEL_SUFFIX=$1
+    else
+        unset LABEL_SUFFIX
     fi
 
+    cleanup-test-env
     . ./scripts/test-setup-sonobuoy$suffix
-    run-e2e-tests
+    
+    if [ "$1" = "parallel" ] || [ "$2" = "parallel" ]; then
+        label=PARALLEL \
+            logName=e2e-STATUS-${ARCH}-parallel.log \
+            e2e-test "${sonobuoyParallelArgs[@]}"
+        echo "Exit code $? for parallel start"
+    fi
+
+    if [ "$1" = "serial" ] || [ "$2" = "serial" ]; then
+        label=SERIAL \
+            logName=e2e-STATUS-${ARCH}-serial.log \
+            e2e-test "${sonobuoySerialArgs[@]}"
+        echo "Exit code $? for serial start"
+    fi
 }
 export -f test-run-sonobuoy
 
@@ -619,12 +610,12 @@ pid-cleanup() {
     local failCount=0
     set +e
     if [ $code -eq 0 ]; then
-        for pid in ${pids[@]}; do
+        for pid in "${pids[@]}"; do
             wait $pid || code=$?
         done
     fi
     if [ $code -ne 0 ]; then
-        for pid in ${pids[@]}; do
+        for pid in "${pids[@]}"; do
             pkill -P $pid
             wait $pid || failCount=$((failCount+1))
         done
@@ -635,7 +626,7 @@ pid-cleanup() {
     if [ $failCount -eq 0 ]; then
         printf '\033[32mAll tests passed.\033[m\n'
     else
-        printf "\033[31m$failCount tests failed.\033[m\n"
+        printf "\033[31m%s tests failed.\033[m\n" "$failCount"
         if [ "$DRONE_BUILD_EVENT" = 'tag' ]; then
             printf "\033[31mIgnoring test failures on tag.\033[m\n"
             code=0

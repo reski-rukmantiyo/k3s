@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/k3s-io/k3s/pkg/authenticator/hash"
+	"github.com/k3s-io/k3s/pkg/passwd"
+	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/pkg/errors"
-	"github.com/rancher/k3s/pkg/authenticator/hash"
-	"github.com/rancher/k3s/pkg/passwd"
-	"github.com/rancher/k3s/pkg/version"
 	coreclient "github.com/rancher/wrangler/pkg/generated/controllers/core/v1"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
@@ -18,8 +18,8 @@ import (
 )
 
 var (
-	// hasher provides the algorithm for generating and verifying hashes
-	hasher = hash.NewSCrypt()
+	// Hasher provides the algorithm for generating and verifying hashes
+	Hasher = hash.NewSCrypt()
 )
 
 func getSecretName(nodeName string) string {
@@ -33,7 +33,7 @@ func verifyHash(secretClient coreclient.SecretClient, nodeName, pass string) err
 		return err
 	}
 	if hash, ok := secret.Data["hash"]; ok {
-		if err := hasher.VerifyHash(string(hash), pass); err != nil {
+		if err := Hasher.VerifyHash(string(hash), pass); err != nil {
 			return errors.Wrapf(err, "unable to verify hash for node '%s'", nodeName)
 		}
 		return nil
@@ -47,7 +47,7 @@ func Ensure(secretClient coreclient.SecretClient, nodeName, pass string) error {
 		return err
 	}
 
-	hash, err := hasher.CreateHash(pass)
+	hash, err := Hasher.CreateHash(pass)
 	if err != nil {
 		return errors.Wrapf(err, "unable to create hash for node '%s'", nodeName)
 	}
@@ -110,7 +110,6 @@ func MigrateFile(secretClient coreclient.SecretClient, nodeClient coreclient.Nod
 			}
 		}
 	}
-	ms := time.Since(start).Milliseconds()
-	logrus.Infof("Migrated %d node password entries in %d milliseconds, average %d ms", ensured, ms, ms/ensured)
+	logrus.Infof("Migrated %d node password entries in %s", ensured, time.Since(start))
 	return os.Remove(passwordFile)
 }

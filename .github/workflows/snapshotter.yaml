@@ -6,7 +6,7 @@ on:
       - "channel.yaml"
       - "install.sh"
       - "tests/**"
-      - "!tests/vagrant/snapshotter/**"
+      - "!tests/snapshotter/**"
       - ".github/**"
       - "!.github/workflows/snapshotter.yaml"
   pull_request:
@@ -15,29 +15,22 @@ on:
       - "channel.yaml"
       - "install.sh"
       - "tests/**"
-      - "!tests/vagrant/snapshotter/**"
+      - "!tests/snapshotter/**"
       - ".github/**"
       - "!.github/workflows/snapshotter.yaml"
   workflow_dispatch: {}
+
+permissions:
+  contents: read
+
 jobs:
-  prep:
-    name: "Prepare"
-    runs-on: ubuntu-20.04
-    timeout-minutes: 40
-    steps:
-      - name: "Checkout"
-        uses: actions/checkout@v2
-        with: { fetch-depth: 1 }
-      - name: "Build"
-        run: DOCKER_BUILDKIT=1 SKIP_VALIDATE=1 make
-      - name: "Upload Binary"
-        uses: actions/upload-artifact@v2
-        with: { name: k3s, path: dist/artifacts/k3s }
+  build:
+    uses: ./.github/workflows/build-k3s.yaml
   test:
     name: "Smoke Test"
-    needs: prep
+    needs: build
     # nested virtualization is only available on macOS hosts
-    runs-on: macos-10.15
+    runs-on: macos-12
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -47,23 +40,23 @@ jobs:
       max-parallel: 1
     defaults:
       run:
-        working-directory: tests/vagrant/snapshotter/${{ matrix.snapshotter }}/${{ matrix.vm }}
+        working-directory: tests/snapshotter/${{ matrix.snapshotter }}/${{ matrix.vm }}
     env:
       VAGRANT_EXPERIMENTAL: disks
     steps:
       - name: "Checkout"
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with: { fetch-depth: 1 }
       - name: "Download Binary"
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v3
         with: { name: k3s, path: dist/artifacts/ }
       - name: "Vagrant Cache"
-        uses: actions/cache@v2
+        uses: actions/cache@v3
         with:
           path: |
             ~/.vagrant.d/boxes
             ~/.vagrant.d/gems
-          key: snapshotter-${{ hashFiles(format('tests/vagrant/snapshotter/{0}/{1}/Vagrantfile', matrix.snapshotter, matrix.vm)) }}
+          key: snapshotter-${{ hashFiles(format('tests/snapshotter/{0}/{1}/Vagrantfile', matrix.snapshotter, matrix.vm)) }}
         id: vagrant-cache
         continue-on-error: true
       - name: "Vagrant Plugin(s)"

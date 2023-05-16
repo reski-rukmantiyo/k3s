@@ -2,9 +2,9 @@ package loadbalancer
 
 import (
 	"encoding/json"
-	"io/ioutil"
+	"os"
 
-	"github.com/rancher/k3s/pkg/agent/util"
+	"github.com/k3s-io/k3s/pkg/agent/util"
 )
 
 func (lb *LoadBalancer) writeConfig() error {
@@ -17,7 +17,7 @@ func (lb *LoadBalancer) writeConfig() error {
 
 func (lb *LoadBalancer) updateConfig() error {
 	writeConfig := true
-	if configBytes, err := ioutil.ReadFile(lb.configFile); err == nil {
+	if configBytes, err := os.ReadFile(lb.configFile); err == nil {
 		config := &LoadBalancer{}
 		if err := json.Unmarshal(configBytes, config); err == nil {
 			if config.ServerURL == lb.ServerURL {

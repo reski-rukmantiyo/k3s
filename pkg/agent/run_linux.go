@@ -1,18 +1,18 @@
+//go:build linux
 // +build linux
 
 package agent
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
-	"github.com/rancher/k3s/pkg/cli/cmds"
-	"github.com/rancher/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/cli/cmds"
+	"github.com/k3s-io/k3s/pkg/daemons/config"
 )
 
 const (
-	dockershimSock = "unix:///var/run/dockershim.sock"
+	criDockerdSock = "unix:///run/k3s/cri-dockerd/cri-dockerd.sock"
 	containerdSock = "unix:///run/k3s/containerd/containerd.sock"
 )
 
@@ -23,7 +23,7 @@ func setupCriCtlConfig(cfg cmds.Agent, nodeConfig *config.Node) error {
 	if cre == "" {
 		switch {
 		case cfg.Docker:
-			cre = dockershimSock
+			cre = criDockerdSock
 		default:
 			cre = containerdSock
 		}
@@ -37,5 +37,5 @@ func setupCriCtlConfig(cfg cmds.Agent, nodeConfig *config.Node) error {
 	}
 
 	crp := "runtime-endpoint: " + cre + "\n"
-	return ioutil.WriteFile(agentConfDir+"/crictl.yaml", []byte(crp), 0600)
+	return os.WriteFile(agentConfDir+"/crictl.yaml", []byte(crp), 0600)
 }

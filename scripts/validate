@@ -3,26 +3,17 @@ set -e
 
 cd $(dirname $0)/..
 
-GO=${GO-go}
+echo Running: go mod tidy
+go mod tidy
 
-if ! command -v golangci-lint; then
-    echo Skipping validation: no golangci-lint available
+echo Running: go generate
+go generate
+
+if [ -n "$SKIP_VALIDATE" ]; then
+    echo Skipping validation
     exit
 fi
 echo Running validation
-
-if [ ! -e build/data ];then
-    mkdir -p build/data
-fi
-
-echo Running: "${GO}" generate
-"${GO}" generate
-
-echo Running: golangci-lint
-golangci-lint run -v
-
-GO111MODULE=on go mod tidy
-GO111MODULE=on go mod vendor
 
 . ./scripts/version.sh
 
@@ -32,3 +23,26 @@ if [ -n "$DIRTY" ]; then
     git diff
     exit 1
 fi
+
+echo Running: go version
+DEPENDENCIES_URL="https://raw.githubusercontent.com/kubernetes/kubernetes/${VERSION_K8S}/build/dependencies.yaml"
+GOLANG_VERSION=$(curl -sL "${DEPENDENCIES_URL}" | yq e '.dependencies[] | select(.name == "golang: upstream version").version' -)
+if ! go version | grep -s "go version go${GOLANG_VERSION} "; then
+  echo "Unexpected $(go version) - Kubernetes ${VERSION_K8S} should be built with go version go${GOLANG_VERSION}"
+  exit 1
+fi
+
+echo Running: go mod verify
+go mod verify
+
+if [ ! -e build/data ];then
+    mkdir -p build/data
+fi
+
+if ! command -v golangci-lint; then
+    echo Skipping validation: no golangci-lint available
+    exit
+fi
+
+echo Running: golangci-lint
+golangci-lint run -v

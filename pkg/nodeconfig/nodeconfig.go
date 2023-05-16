@@ -8,9 +8,10 @@ import (
 	"os"
 	"strings"
 
+	"github.com/k3s-io/k3s/pkg/configfilearg"
+	"github.com/k3s-io/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/pkg/errors"
-	"github.com/rancher/k3s/pkg/configfilearg"
-	"github.com/rancher/k3s/pkg/version"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -18,6 +19,7 @@ var (
 	NodeArgsAnnotation       = version.Program + ".io/node-args"
 	NodeEnvAnnotation        = version.Program + ".io/node-env"
 	NodeConfigHashAnnotation = version.Program + ".io/node-config-hash"
+	ClusterEgressLabel       = "egress." + version.Program + ".io/cluster"
 )
 
 const (
@@ -68,7 +70,11 @@ func getNodeEnv() (string, error) {
 	return string(k3sEnvJSON), nil
 }
 
-func SetNodeConfigAnnotations(node *corev1.Node) (bool, error) {
+// SetNodeConfigAnnotations stores a redacted version of the k3s cli args and
+// environment variables as annotations on the node object. It also stores a
+// hash of the combined args + variables. These are used by other components
+// to determine if the node configuration has been changed.
+func SetNodeConfigAnnotations(nodeConfig *config.Node, node *corev1.Node) (bool, error) {
 	nodeArgs, err := getNodeArgs()
 	if err != nil {
 		return false, err
@@ -97,6 +103,30 @@ func SetNodeConfigAnnotations(node *corev1.Node) (bool, error) {
 	return true, nil
 }
 
+// SetNodeConfigLabels adds labels for functionality flags
+// that may not be present on down-level or up-level nodes.
+// These labels are used by other components to determine whether
+// or not a node supports particular functionality.
+func SetNodeConfigLabels(nodeConfig *config.Node, node *corev1.Node) (bool, error) {
+	if node.Labels == nil {
+		node.Labels = make(map[string]string)
+	}
+	_, hasLabel := node.Labels[ClusterEgressLabel]
+	switch nodeConfig.EgressSelectorMode {
+	case config.EgressSelectorModeCluster, config.EgressSelectorModePod:
+		if !hasLabel {
+			node.Labels[ClusterEgressLabel] = "true"
+			return true, nil
+		}
+	default:
+		if hasLabel {
+			delete(node.Labels, ClusterEgressLabel)
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func isSecret(key string) bool {
 	secretData := []string{
 		version.ProgramUpper + "_TOKEN",
@@ -109,7 +139,6 @@ func isSecret(key string) bool {
 		"-t",
 		"--agent-token",
 		"--datastore-endpoint",
-		"--cluster-secret",
 		"--etcd-s3-access-key",
 		"--etcd-s3-secret-key",
 	}

@@ -3,7 +3,7 @@ package templates
 import (
 	"github.com/rancher/wharfie/pkg/registries"
 
-	"github.com/rancher/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/daemons/config"
 )
 
 type ContainerdRuntimeConfig struct {
@@ -14,7 +14,10 @@ type ContainerdRuntimeConfig struct {
 type ContainerdConfig struct {
 	NodeConfig            *config.Node
 	DisableCgroup         bool
+	SystemdCgroup         bool
 	IsRunningInUserNS     bool
+	EnableUnprivileged    bool
 	PrivateRegistryConfig *registries.Registry
 	ExtraRuntimes         map[string]ContainerdRuntimeConfig
+	Program               string
 }

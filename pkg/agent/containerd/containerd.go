@@ -2,12 +2,9 @@ package containerd
 
 import (
 	"bufio"
-	"compress/bzip2"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,50 +18,53 @@ import (
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/pkg/cri/constants"
 	"github.com/containerd/containerd/reference/docker"
-	"github.com/klauspost/compress/zstd"
+	"github.com/k3s-io/k3s/pkg/agent/cri"
+	util2 "github.com/k3s-io/k3s/pkg/agent/util"
+	"github.com/k3s-io/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/natefinch/lumberjack"
-	"github.com/pierrec/lz4"
 	"github.com/pkg/errors"
-	util2 "github.com/rancher/k3s/pkg/agent/util"
-	"github.com/rancher/k3s/pkg/daemons/config"
-	"github.com/rancher/k3s/pkg/untar"
-	"github.com/rancher/k3s/pkg/version"
+	"github.com/rancher/wharfie/pkg/tarfile"
 	"github.com/rancher/wrangler/pkg/merr"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
-	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
-)
-
-const (
-	maxMsgSize = 1024 * 1024 * 16
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
 // Run configures and starts containerd as a child process. Once it is up, images are preloaded
 // or pulled from files found in the agent images directory.
 func Run(ctx context.Context, cfg *config.Node) error {
-	args := getContainerdArgs(cfg)
-
 	if err := setupContainerdConfig(ctx, cfg); err != nil {
 		return err
 	}
 
+	args := getContainerdArgs(cfg)
 	stdOut := io.Writer(os.Stdout)
 	stdErr := io.Writer(os.Stderr)
 
 	if cfg.Containerd.Log != "" {
 		logrus.Infof("Logging containerd to %s", cfg.Containerd.Log)
-		stdOut = &lumberjack.Logger{
+		fileOut := &lumberjack.Logger{
 			Filename:   cfg.Containerd.Log,
 			MaxSize:    50,
 			MaxBackups: 3,
 			MaxAge:     28,
 			Compress:   true,
 		}
-		stdErr = stdOut
+		// If k3s is started with --debug, write logs to both the log file and stdout/stderr,
+		// even if a log path is set.
+		if cfg.Containerd.Debug {
+			stdOut = io.MultiWriter(stdOut, fileOut)
+			stdErr = io.MultiWriter(stdErr, fileOut)
+		} else {
+			stdOut = fileOut
+			stdErr = fileOut
+		}
 	}
 
 	go func() {
 		env := []string{}
+		cenv := []string{}
 
 		for _, e := range os.Environ() {
 			pair := strings.SplitN(e, "=", 2)
@@ -79,7 +79,7 @@ func Run(ctx context.Context, cfg *config.Node) error {
 				// This allows doing things like setting a proxy for image pulls by setting
 				// CONTAINERD_https_proxy=http://proxy.example.com:8080
 				pair[0] = strings.TrimPrefix(pair[0], "CONTAINERD_")
-				fallthrough
+				cenv = append(cenv, strings.Join(pair, "="))
 			default:
 				env = append(env, strings.Join(pair, "="))
 			}
@@ -89,7 +89,7 @@ func Run(ctx context.Context, cfg *config.Node) error {
 		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 		cmd.Stdout = stdOut
 		cmd.Stderr = stdErr
-		cmd.Env = env
+		cmd.Env = append(env, cenv...)
 
 		addDeathSig(cmd)
 		if err := cmd.Run(); err != nil {
@@ -98,25 +98,9 @@ func Run(ctx context.Context, cfg *config.Node) error {
 		os.Exit(1)
 	}()
 
-	first := true
-	for {
-		conn, err := CriConnection(ctx, cfg.Containerd.Address)
-		if err == nil {
-			conn.Close()
-			break
-		}
-		if first {
-			first = false
-		} else {
-			logrus.Infof("Waiting for containerd startup: %v", err)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Second):
-		}
+	if err := cri.WaitForService(ctx, cfg.Containerd.Address, "containerd"); err != nil {
+		return err
 	}
-	logrus.Info("Containerd is now running")
 
 	return preloadImages(ctx, cfg)
 }
@@ -138,19 +122,19 @@ func preloadImages(ctx context.Context, cfg *config.Node) error {
 		return nil
 	}
 
-	fileInfos, err := ioutil.ReadDir(cfg.Images)
+	fileInfos, err := os.ReadDir(cfg.Images)
 	if err != nil {
 		logrus.Errorf("Unable to read images in %s: %v", cfg.Images, err)
 		return nil
 	}
 
-	client, err := containerd.New(cfg.Containerd.Address)
+	client, err := Client(cfg.Containerd.Address)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	criConn, err := CriConnection(ctx, cfg.Containerd.Address)
+	criConn, err := cri.Connection(ctx, cfg.Containerd.Address)
 	if err != nil {
 		return err
 	}
@@ -194,7 +178,7 @@ func preloadImages(ctx context.Context, cfg *config.Node) error {
 			logrus.Errorf("Error encountered while importing %s: %v", filePath, err)
 			continue
 		}
-		logrus.Debugf("Imported images from %s in %s", filePath, time.Since(start))
+		logrus.Infof("Imported images from %s in %s", filePath, time.Since(start))
 	}
 	return nil
 }
@@ -203,39 +187,26 @@ func preloadImages(ctx context.Context, cfg *config.Node) error {
 // This is in its own function so that we can ensure that the various readers are properly closed, as some
 // decompressing readers need to be explicitly closed and others do not.
 func preloadFile(ctx context.Context, cfg *config.Node, client *containerd.Client, criConn *grpc.ClientConn, filePath string) error {
-	file, err := os.Open(filePath)
+	if util2.HasSuffixI(filePath, ".txt") {
+		file, err := os.Open(filePath)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		logrus.Infof("Pulling images from %s", filePath)
+		return prePullImages(ctx, criConn, file)
+	}
+
+	opener, err := tarfile.GetOpener(filePath)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 
-	var imageReader io.Reader
-	switch {
-	case util2.HasSuffixI(filePath, ".txt"):
-		return prePullImages(ctx, criConn, file)
-	case util2.HasSuffixI(filePath, ".tar"):
-		imageReader = file
-	case util2.HasSuffixI(filePath, ".tar.lz4"):
-		imageReader = lz4.NewReader(file)
-	case util2.HasSuffixI(filePath, ".tar.bz2", ".tbz"):
-		imageReader = bzip2.NewReader(file)
-	case util2.HasSuffixI(filePath, ".tar.gz", ".tgz"):
-		zr, err := gzip.NewReader(file)
-		if err != nil {
-			return err
-		}
-		defer zr.Close()
-		imageReader = zr
-	case util2.HasSuffixI(filePath, "tar.zst", ".tzst"):
-		zr, err := zstd.NewReader(file, zstd.WithDecoderMaxMemory(untar.MaxDecoderMemory))
-		if err != nil {
-			return err
-		}
-		defer zr.Close()
-		imageReader = zr
-	default:
-		return errors.New("unhandled file type")
+	imageReader, err := opener()
+	if err != nil {
+		return err
 	}
+	defer imageReader.Close()
 
 	logrus.Infof("Importing images from %s", filePath)
 

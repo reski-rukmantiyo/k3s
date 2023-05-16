@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/rancher/k3s/pkg/token"
-	"github.com/rancher/k3s/pkg/util"
+	"github.com/k3s-io/k3s/pkg/token"
+	"github.com/k3s-io/k3s/pkg/util"
 )
 
 type entry struct {
@@ -58,14 +58,6 @@ func Read(file string) (*Passwd, error) {
 	}
 
 	return result, nil
-}
-
-func (p *Passwd) Check(name, pass string) (matches bool, exists bool) {
-	e, ok := p.names[name]
-	if !ok {
-		return false, false
-	}
-	return e.pass == pass, true
 }
 
 func (p *Passwd) EnsureUser(name, role, passwd string) error {
